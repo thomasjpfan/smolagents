@@ -764,3 +764,7 @@ class WasmExecutor(RemotePythonExecutor):
           });
         });
         """)
+
+
+class ModalExecutor(RemotePythonExecutor):
+    pass

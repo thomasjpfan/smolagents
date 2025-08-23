@@ -198,18 +198,7 @@ class TestDockerExecutorUnit:
             mock_container.remove.assert_called_once()
 
 
-@pytest.fixture
-def docker_executor():
-    executor = DockerExecutor(
-        additional_imports=["pillow", "numpy"],
-        logger=AgentLogger(LogLevel.INFO, Console(force_terminal=False, file=io.StringIO())),
-    )
-    yield executor
-    executor.delete()
-
-
-@require_run_all
-class TestDockerExecutorIntegration:
+class CommonDockerExecutorIntegration:
     @pytest.fixture(autouse=True)
     def set_executor(self, docker_executor):
         self.executor = docker_executor
@@ -341,6 +330,18 @@ class TestDockerExecutorIntegration:
         code_output = self.executor(code_action)
         assert code_output.is_final_answer is True
         assert code_output.output == "answer1_CUSTOM_answer2"
+
+
+@require_run_all
+class TestDockerExecutorIntegration(CommonDockerExecutorIntegration):
+    @pytest.fixture
+    def docker_executor(self):
+        executor = DockerExecutor(
+            additional_imports=["pillow", "numpy"],
+            logger=AgentLogger(LogLevel.INFO, Console(force_terminal=False, file=io.StringIO())),
+        )
+        yield executor
+        executor.delete()
 
 
 class TestWasmExecutorUnit:
