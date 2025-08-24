@@ -9,7 +9,7 @@ from rich.console import Console
 
 from smolagents.default_tools import FinalAnswerTool, WikipediaSearchTool
 from smolagents.monitoring import AgentLogger, LogLevel
-from smolagents.remote_executors import DockerExecutor, E2BExecutor, RemotePythonExecutor, WasmExecutor
+from smolagents.remote_executors import DockerExecutor, E2BExecutor, RemotePythonExecutor, WasmExecutor, ModalExecutor
 from smolagents.utils import AgentError
 
 from .utils.markers import require_run_all
@@ -200,12 +200,8 @@ class TestDockerExecutorUnit:
 
 class CommonDockerExecutorIntegration:
     @pytest.fixture(autouse=True)
-    def set_executor(self, docker_executor):
-        self.executor = docker_executor
-
-    def test_initialization(self):
-        """Check if DockerExecutor initializes without errors"""
-        assert self.executor.container is not None, "Container should be initialized"
+    def set_executor(self, custom_executor):
+        self.executor = custom_executor
 
     def test_state_persistence(self):
         """Test that variables and imports form one snippet persist in the next"""
@@ -249,15 +245,6 @@ class CommonDockerExecutorIntegration:
         with pytest.raises(AgentError) as exception_info:
             self.executor(code_action)
         assert "SyntaxError" in str(exception_info.value), "Should raise a syntax error"
-
-    def test_cleanup_on_deletion(self):
-        """Test if Docker container stops and removes on deletion"""
-        container_id = self.executor.container.id
-        self.executor.delete()  # Trigger cleanup
-
-        client = docker.from_env()
-        containers = [c.id for c in client.containers.list(all=True)]
-        assert container_id not in containers, "Container should be removed"
 
     @pytest.mark.parametrize(
         "code_action, expected_result",
@@ -335,8 +322,33 @@ class CommonDockerExecutorIntegration:
 @require_run_all
 class TestDockerExecutorIntegration(CommonDockerExecutorIntegration):
     @pytest.fixture
-    def docker_executor(self):
+    def custom_executor(self):
         executor = DockerExecutor(
+            additional_imports=["pillow", "numpy"],
+            logger=AgentLogger(LogLevel.INFO, Console(force_terminal=False, file=io.StringIO())),
+        )
+        yield executor
+        executor.delete()
+
+    def test_initialization(self):
+        """Check if DockerExecutor initializes without errors"""
+        assert self.executor.container is not None, "Container should be initialized"
+
+    def test_cleanup_on_deletion(self):
+        """Test if Docker container stops and removes on deletion"""
+        container_id = self.executor.container.id
+        self.executor.delete()  # Trigger cleanup
+
+        client = docker.from_env()
+        containers = [c.id for c in client.containers.list(all=True)]
+        assert container_id not in containers, "Container should be removed"
+
+
+@require_run_all
+class TestModalExecutorIntegration(CommonDockerExecutorIntegration):
+    @pytest.fixture
+    def custom_executor(self):
+        executor = ModalExecutor(
             additional_imports=["pillow", "numpy"],
             logger=AgentLogger(LogLevel.INFO, Console(force_terminal=False, file=io.StringIO())),
         )

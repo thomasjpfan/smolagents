@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import base64
+from copy import deepcopy
 import inspect
 import json
 import os
@@ -22,6 +23,7 @@ import pickle
 import subprocess
 import tempfile
 import time
+import secrets
 from io import BytesIO
 from pathlib import Path
 from textwrap import dedent
@@ -29,6 +31,9 @@ from typing import Any
 
 import PIL.Image
 import requests
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+from http.client import RemoteDisconnected
 
 from .default_tools import FinalAnswerTool
 from .local_python_executor import CodeOutput, PythonExecutor
@@ -241,6 +246,76 @@ class E2BExecutor(RemotePythonExecutor):
             self.logger.log_error(f"Error during cleanup: {e}")
 
 
+def _websocket_send_execute_request(code: str, ws) -> str:
+    """Send code execution request to kernel."""
+    import uuid
+
+    # Generate a unique message ID
+    msg_id = str(uuid.uuid4())
+
+    # Create execute request
+    execute_request = {
+        "header": {
+            "msg_id": msg_id,
+            "username": "anonymous",
+            "session": str(uuid.uuid4()),
+            "msg_type": "execute_request",
+            "version": "5.0",
+        },
+        "parent_header": {},
+        "metadata": {},
+        "content": {
+            "code": code,
+            "silent": False,
+            "store_history": True,
+            "user_expressions": {},
+            "allow_stdin": False,
+        },
+    }
+
+    ws.send(json.dumps(execute_request))
+    return msg_id
+
+
+def _websocket_run_code_raise_errors(code: str, ws, logger) -> CodeOutput:
+    """Run code over a websocket."""
+    try:
+        # Send execute request
+        msg_id = _websocket_send_execute_request(code, ws)
+
+        # Collect output and results
+        outputs = []
+        result = None
+        is_final_answer = False
+
+        while True:
+            msg = json.loads(ws.recv())
+            parent_msg_id = msg.get("parent_header", {}).get("msg_id")
+            # Skip unrelated messages
+            if parent_msg_id != msg_id:
+                continue
+            msg_type = msg.get("msg_type", "")
+            msg_content = msg.get("content", {})
+            if msg_type == "stream":
+                outputs.append(msg_content["text"])
+            elif msg_type == "execute_result":
+                result = msg_content["data"].get("text/plain", None)
+            elif msg_type == "error":
+                if msg_content.get("ename", "") == RemotePythonExecutor.FINAL_ANSWER_EXCEPTION:
+                    result = pickle.loads(base64.b64decode(msg_content.get("evalue", "")))
+                    is_final_answer = True
+                else:
+                    raise AgentError("\n".join(msg_content.get("traceback", [])), logger)
+            elif msg_type == "status" and msg_content["execution_state"] == "idle":
+                break
+
+        return CodeOutput(output=result, logs="".join(outputs), is_final_answer=is_final_answer)
+
+    except Exception as e:
+        logger.log_error(f"Code execution failed: {e}")
+        raise
+
+
 class DockerExecutor(RemotePythonExecutor):
     """
     Executes Python code using Jupyter Kernel Gateway in a Docker container.
@@ -376,72 +451,8 @@ class DockerExecutor(RemotePythonExecutor):
             self.cleanup()
             raise RuntimeError(f"Failed to initialize Jupyter kernel: {e}") from e
 
-    def run_code_raise_errors(self, code_action: str) -> CodeOutput:
-        try:
-            # Send execute request
-            msg_id = self._send_execute_request(code_action)
-
-            # Collect output and results
-            outputs = []
-            result = None
-            is_final_answer = False
-
-            while True:
-                msg = json.loads(self.ws.recv())
-                parent_msg_id = msg.get("parent_header", {}).get("msg_id")
-                # Skip unrelated messages
-                if parent_msg_id != msg_id:
-                    continue
-                msg_type = msg.get("msg_type", "")
-                msg_content = msg.get("content", {})
-                if msg_type == "stream":
-                    outputs.append(msg_content["text"])
-                elif msg_type == "execute_result":
-                    result = msg_content["data"].get("text/plain", None)
-                elif msg_type == "error":
-                    if msg_content.get("ename", "") == RemotePythonExecutor.FINAL_ANSWER_EXCEPTION:
-                        result = pickle.loads(base64.b64decode(msg_content.get("evalue", "")))
-                        is_final_answer = True
-                    else:
-                        raise AgentError("\n".join(msg_content.get("traceback", [])), self.logger)
-                elif msg_type == "status" and msg_content["execution_state"] == "idle":
-                    break
-
-            return CodeOutput(output=result, logs="".join(outputs), is_final_answer=is_final_answer)
-
-        except Exception as e:
-            self.logger.log_error(f"Code execution failed: {e}")
-            raise
-
-    def _send_execute_request(self, code: str) -> str:
-        """Send code execution request to kernel."""
-        import uuid
-
-        # Generate a unique message ID
-        msg_id = str(uuid.uuid4())
-
-        # Create execute request
-        execute_request = {
-            "header": {
-                "msg_id": msg_id,
-                "username": "anonymous",
-                "session": str(uuid.uuid4()),
-                "msg_type": "execute_request",
-                "version": "5.0",
-            },
-            "parent_header": {},
-            "metadata": {},
-            "content": {
-                "code": code,
-                "silent": False,
-                "store_history": True,
-                "user_expressions": {},
-                "allow_stdin": False,
-            },
-        }
-
-        self.ws.send(json.dumps(execute_request))
-        return msg_id
+    def run_code_raise_errors(self, code: str) -> CodeOutput:
+        return _websocket_run_code_raise_errors(code, self.ws, self.logger)
 
     def cleanup(self):
         """Clean up the Docker container and resources."""
@@ -454,6 +465,113 @@ class DockerExecutor(RemotePythonExecutor):
                 del self.container
         except Exception as e:
             self.logger.log_error(f"Error during cleanup: {e}")
+
+    def delete(self):
+        """Ensure cleanup on deletion."""
+        self.cleanup()
+
+
+class ModalExecutor(RemotePythonExecutor):
+    """
+    Executes Python code using Modal.
+
+    Args:
+        additional_imports: Additional imports to install.
+        logger (`Logger`): Logger to use for output and errors.
+        app (`str`): App name.
+        sandbox_create_kwargs (`dict`, optional): Keyword arguments to pass to creating the sandbox.
+    """
+
+    _JUPYTER_PORT = 8888
+
+    def __init__(
+        self,
+        additional_imports: list[str],
+        logger,
+        app_name="smolagent-executor",
+        sandbox_create_kwargs=None,
+    ):
+        super().__init__(additional_imports, logger)
+        import modal
+
+        if sandbox_create_kwargs is None:
+            sandbox_create_kwargs = {}
+        else:
+            sandbox_create_kwargs = deepcopy(sandbox_create_kwargs)
+
+        sandbox_create_kwargs_ = {
+            "image": modal.Image.debian_slim().uv_pip_install("jupyter_kernel_gateway", "ipykernel"),
+            "timeout": 60 * 5,
+            **sandbox_create_kwargs,
+        }
+
+        if "app" not in sandbox_create_kwargs_:
+            sandbox_create_kwargs_["app"] = modal.App.lookup(app_name, create_if_missing=True)
+
+        encrypted_ports = sandbox_create_kwargs_.get("encrypted_ports", [])
+        encrypted_ports.append(self._JUPYTER_PORT)
+        sandbox_create_kwargs_["encrypted_ports"] = encrypted_ports
+
+        secrets_ = sandbox_create_kwargs_.get("secrets", [])
+        token = secrets.token_urlsafe(13)
+        secrets_.append(modal.Secret.from_dict({"KG_AUTH_TOKEN": token}))
+        sandbox_create_kwargs_["secrets"] = secrets_
+
+        entrypoint = [
+            "jupyter",
+            "kernelgateway",
+            "--KernelGatewayApp.ip='0.0.0.0'",
+            f"--KernelGatewayApp.port={self._JUPYTER_PORT}",
+            "--KernelGatewayApp.allow_origin='*'",
+        ]
+
+        self.sandbox = modal.Sandbox.create(
+            *entrypoint,
+            **sandbox_create_kwargs_,
+        )
+
+        tunnel = self.sandbox.tunnels()[self._JUPYTER_PORT]
+        self._wait_for_server(tunnel.host, token)
+
+        kernel_id = self._start_kernel(tunnel.host, token)
+        self.ws_url = f"wss://{tunnel.host}/api/kernels/{kernel_id}/channels?token={token}"
+        self.installed_packages = self.install_packages(additional_imports)
+
+    @classmethod
+    def _wait_for_server(cls, host: str, token: str):
+        """Wait for server to start up."""
+        n_retries = 0
+        req = Request(f"https://{host}/api/kernelspecs?token={token}", method="GET")
+        while True:
+            try:
+                with urlopen(req):
+                    pass
+                break
+            except (HTTPError, RemoteDisconnected):
+                n_retries += 1
+                if n_retries > 60:
+                    raise RuntimeError("Unable to connect to sandbox")
+            time.sleep(1.0)
+
+    @classmethod
+    def _start_kernel(cls, host: str, token: str) -> str:
+        """Start kernel."""
+        kernels_url = f"https://{host}/api/kernels?token={token}"
+        req = Request(kernels_url, method="POST")
+        with urlopen(req) as response:
+            body = response.read()
+            json_resp = json.loads(body)
+
+        return json_resp["id"]
+
+    def run_code_raise_errors(self, code: str) -> CodeOutput:
+        from websockets.sync.client import connect
+
+        with connect(self.ws_url) as ws:
+            return _websocket_run_code_raise_errors(code, ws, self.logger)
+
+    def cleanup(self):
+        self.sandbox.terminate()
 
     def delete(self):
         """Ensure cleanup on deletion."""
@@ -764,7 +882,3 @@ class WasmExecutor(RemotePythonExecutor):
           });
         });
         """)
-
-
-class ModalExecutor(RemotePythonExecutor):
-    pass
