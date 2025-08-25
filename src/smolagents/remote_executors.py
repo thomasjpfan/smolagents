@@ -24,10 +24,11 @@ import secrets
 import subprocess
 import tempfile
 import time
+from contextlib import closing
 from io import BytesIO
 from pathlib import Path
 from textwrap import dedent
-from typing import Any
+from typing import Any, Optional
 
 import PIL.Image
 import requests
@@ -314,6 +315,25 @@ def _websocket_run_code_raise_errors(code: str, ws, logger) -> CodeOutput:
         raise
 
 
+def _create_kernel_http(crate_kernel_endpoint: str, logger) -> str:
+    """Create kernel using http."""
+
+    r = requests.post(crate_kernel_endpoint)
+    if r.status_code != 201:
+        error_details = {
+            "status_code": r.status_code,
+            "headers": dict(r.headers),
+            "url": r.url,
+            "body": r.text,
+            "request_method": r.request.method,
+            "request_headers": dict(r.request.headers),
+            "request_body": r.request.body,
+        }
+        logger.log_error(f"Failed to create kernel. Details: {json.dumps(error_details, indent=2)}")
+        raise RuntimeError(f"Failed to create kernel: Status {r.status_code}\nResponse: {r.text}") from None
+    return r.json()["id"]
+
+
 class DockerExecutor(RemotePythonExecutor):
     """
     Executes Python code using Jupyter Kernel Gateway in a Docker container.
@@ -421,21 +441,7 @@ class DockerExecutor(RemotePythonExecutor):
             self.base_url = f"http://{host}:{port}"
 
             # Create new kernel via HTTP
-            r = requests.post(f"{self.base_url}/api/kernels")
-            if r.status_code != 201:
-                error_details = {
-                    "status_code": r.status_code,
-                    "headers": dict(r.headers),
-                    "url": r.url,
-                    "body": r.text,
-                    "request_method": r.request.method,
-                    "request_headers": dict(r.request.headers),
-                    "request_body": r.request.body,
-                }
-                self.logger.log_error(f"Failed to create kernel. Details: {json.dumps(error_details, indent=2)}")
-                raise RuntimeError(f"Failed to create kernel: Status {r.status_code}\nResponse: {r.text}") from None
-
-            self.kernel_id = r.json()["id"]
+            self.kernel_id = _create_kernel_http(f"{self.base_url}/api/kernels", logger)
 
             ws_url = f"ws://{host}:{port}/api/kernels/{self.kernel_id}/channels"
             self.ws = create_connection(ws_url)
@@ -480,17 +486,18 @@ class ModalExecutor(RemotePythonExecutor):
         sandbox_create_kwargs (`dict`, optional): Keyword arguments to pass to creating the sandbox.
     """
 
-    _JUPYTER_PORT = 8888
     _ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
     def __init__(
         self,
         additional_imports: list[str],
         logger,
-        app_name="smolagent-executor",
-        sandbox_create_kwargs=None,
+        app_name: str = "smolagent-executor",
+        port: int = 8888,
+        sandbox_create_kwargs: Optional[dict] = None,
     ):
         super().__init__(additional_imports, logger)
+        self.port = port
         try:
             import modal
         except ModuleNotFoundError:
@@ -511,11 +518,9 @@ class ModalExecutor(RemotePythonExecutor):
             sandbox_create_kwargs_["app"] = modal.App.lookup(app_name, create_if_missing=True)
 
         if "encrypted_ports" not in sandbox_create_kwargs_:
-            sandbox_create_kwargs_["encrypted_ports"] = [self._JUPYTER_PORT]
+            sandbox_create_kwargs_["encrypted_ports"] = [self.port]
         else:
-            sandbox_create_kwargs_["encrypted_ports"] = sandbox_create_kwargs_["encrypted_ports"] + [
-                self._JUPYTER_PORT
-            ]
+            sandbox_create_kwargs_["encrypted_ports"] = sandbox_create_kwargs_["encrypted_ports"] + [port]
 
         token = secrets.token_urlsafe(13)
         default_secrets = [modal.Secret.from_dict({"KG_AUTH_TOKEN": token})]
@@ -528,27 +533,30 @@ class ModalExecutor(RemotePythonExecutor):
             "jupyter",
             "kernelgateway",
             "--KernelGatewayApp.ip='0.0.0.0'",
-            f"--KernelGatewayApp.port={self._JUPYTER_PORT}",
+            f"--KernelGatewayApp.port={port}",
             "--KernelGatewayApp.allow_origin='*'",
         ]
 
+        self.logger.log("Starting sandbox", level=LogLevel.INFO)
         self.sandbox = modal.Sandbox.create(
             *entrypoint,
             **sandbox_create_kwargs_,
         )
 
-        tunnel = self.sandbox.tunnels()[self._JUPYTER_PORT]
+        tunnel = self.sandbox.tunnels()[port]
+        self.logger.log(f"Waiting for sandbox on {tunnel.host}:{port}...", level=LogLevel.INFO)
         self._wait_for_server(tunnel.host, token)
 
-        kernel_id = self._start_kernel(tunnel.host, token)
+        self.logger.log("Starting kernel", level=LogLevel.INFO)
+        kernel_id = _create_kernel_http(f"https://{tunnel.host}/api/kernels?token={token}", logger)
         self.ws_url = f"wss://{tunnel.host}/api/kernels/{kernel_id}/channels?token={token}"
         self.installed_packages = self.install_packages(additional_imports)
 
     def run_code_raise_errors(self, code: str) -> CodeOutput:
-        from websockets.sync.client import connect
+        from websocket import create_connection
 
         try:
-            with connect(self.ws_url) as ws:
+            with closing(create_connection(self.ws_url)) as ws:
                 return _websocket_run_code_raise_errors(code, ws, self.logger)
         except AgentError as e:
             e.message = self._strip_ansi_colors(e.message)
@@ -561,12 +569,12 @@ class ModalExecutor(RemotePythonExecutor):
         """Ensure cleanup on deletion."""
         self.cleanup()
 
-    @classmethod
-    def _wait_for_server(cls, host: str, token: str):
+    def _wait_for_server(self, host: str, token: str):
         """Wait for server to start up."""
         n_retries = 0
         while True:
             try:
+                self.logger.log(f"Waiting for server to startup, retried {n_retries} times.", level=LogLevel.INFO)
                 resp = requests.get(f"https://{host}/api/kernelspecs?token={token}")
                 if resp.status_code == 200:
                     break
@@ -575,14 +583,6 @@ class ModalExecutor(RemotePythonExecutor):
                 if n_retries > 60:
                     raise RuntimeError("Unable to connect to sandbox")
                 time.sleep(1.0)
-
-    @classmethod
-    def _start_kernel(cls, host: str, token: str) -> str:
-        """Start kernel."""
-        kernels_url = f"https://{host}/api/kernels?token={token}"
-        req = requests.post(kernels_url)
-        json_resp = req.json()
-        return json_resp["id"]
 
     @classmethod
     def _strip_ansi_colors(cls, text: str) -> str:
