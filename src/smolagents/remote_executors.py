@@ -15,15 +15,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import base64
-from copy import deepcopy
 import inspect
 import json
 import os
 import pickle
+import re
+import secrets
 import subprocess
 import tempfile
 import time
-import secrets
 from io import BytesIO
 from pathlib import Path
 from textwrap import dedent
@@ -31,9 +31,7 @@ from typing import Any
 
 import PIL.Image
 import requests
-from urllib.error import HTTPError
-from urllib.request import Request, urlopen
-from http.client import RemoteDisconnected
+from requests.exceptions import RequestException
 
 from .default_tools import FinalAnswerTool
 from .local_python_executor import CodeOutput, PythonExecutor
@@ -483,6 +481,7 @@ class ModalExecutor(RemotePythonExecutor):
     """
 
     _JUPYTER_PORT = 8888
+    _ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
     def __init__(
         self,
@@ -496,8 +495,6 @@ class ModalExecutor(RemotePythonExecutor):
 
         if sandbox_create_kwargs is None:
             sandbox_create_kwargs = {}
-        else:
-            sandbox_create_kwargs = deepcopy(sandbox_create_kwargs)
 
         sandbox_create_kwargs_ = {
             "image": modal.Image.debian_slim().uv_pip_install("jupyter_kernel_gateway", "ipykernel"),
@@ -508,14 +505,19 @@ class ModalExecutor(RemotePythonExecutor):
         if "app" not in sandbox_create_kwargs_:
             sandbox_create_kwargs_["app"] = modal.App.lookup(app_name, create_if_missing=True)
 
-        encrypted_ports = sandbox_create_kwargs_.get("encrypted_ports", [])
-        encrypted_ports.append(self._JUPYTER_PORT)
-        sandbox_create_kwargs_["encrypted_ports"] = encrypted_ports
+        if "encrypted_ports" not in sandbox_create_kwargs_:
+            sandbox_create_kwargs_["encrypted_ports"] = [self._JUPYTER_PORT]
+        else:
+            sandbox_create_kwargs_["encrypted_ports"] = sandbox_create_kwargs_["encrypted_ports"] + [
+                self._JUPYTER_PORT
+            ]
 
-        secrets_ = sandbox_create_kwargs_.get("secrets", [])
         token = secrets.token_urlsafe(13)
-        secrets_.append(modal.Secret.from_dict({"KG_AUTH_TOKEN": token}))
-        sandbox_create_kwargs_["secrets"] = secrets_
+        default_secrets = [modal.Secret.from_dict({"KG_AUTH_TOKEN": token})]
+        if "secrets" not in sandbox_create_kwargs_:
+            sandbox_create_kwargs_["secrets"] = default_secrets
+        else:
+            sandbox_create_kwargs_["secrets"] = sandbox_create_kwargs_["secrets"] + default_secrets
 
         entrypoint = [
             "jupyter",
@@ -537,38 +539,43 @@ class ModalExecutor(RemotePythonExecutor):
         self.ws_url = f"wss://{tunnel.host}/api/kernels/{kernel_id}/channels?token={token}"
         self.installed_packages = self.install_packages(additional_imports)
 
+    def run_code_raise_errors(self, code: str) -> CodeOutput:
+        from websockets.sync.client import connect
+
+        try:
+            with connect(self.ws_url) as ws:
+                return _websocket_run_code_raise_errors(code, ws, self.logger)
+        except AgentError as e:
+            e.message = self._strip_ansi_colors(e.message)
+            raise e
+
     @classmethod
     def _wait_for_server(cls, host: str, token: str):
         """Wait for server to start up."""
         n_retries = 0
-        req = Request(f"https://{host}/api/kernelspecs?token={token}", method="GET")
         while True:
             try:
-                with urlopen(req):
-                    pass
-                break
-            except (HTTPError, RemoteDisconnected):
+                resp = requests.get(f"https://{host}/api/kernelspecs?token={token}")
+                if resp.status_code == 200:
+                    break
+            except RequestException:
                 n_retries += 1
                 if n_retries > 60:
                     raise RuntimeError("Unable to connect to sandbox")
-            time.sleep(1.0)
+                time.sleep(1.0)
 
     @classmethod
     def _start_kernel(cls, host: str, token: str) -> str:
         """Start kernel."""
         kernels_url = f"https://{host}/api/kernels?token={token}"
-        req = Request(kernels_url, method="POST")
-        with urlopen(req) as response:
-            body = response.read()
-            json_resp = json.loads(body)
-
+        req = requests.post(kernels_url)
+        json_resp = req.json()
         return json_resp["id"]
 
-    def run_code_raise_errors(self, code: str) -> CodeOutput:
-        from websockets.sync.client import connect
-
-        with connect(self.ws_url) as ws:
-            return _websocket_run_code_raise_errors(code, ws, self.logger)
+    @classmethod
+    def _strip_ansi_colors(cls, text: str) -> str:
+        """Remove ansi colors from text."""
+        return cls._ANSI_ESCAPE.sub("", text)
 
     def cleanup(self):
         self.sandbox.terminate()
