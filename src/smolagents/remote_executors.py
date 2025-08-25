@@ -483,7 +483,9 @@ class ModalExecutor(RemotePythonExecutor):
         additional_imports: Additional imports to install.
         logger (`Logger`): Logger to use for output and errors.
         app (`str`): App name.
-        sandbox_create_kwargs (`dict`, optional): Keyword arguments to pass to creating the sandbox.
+        sandbox_create_kwargs (`dict`, optional): Keyword arguments to pass to creating the sandbox. See
+            `modal.Sandbox.create` [docs](https://modal.com/docs/reference/modal.Sandbox#create) for all the
+            keyword arguments.
     """
 
     _ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
@@ -538,17 +540,17 @@ class ModalExecutor(RemotePythonExecutor):
             "--KernelGatewayApp.allow_origin='*'",
         ]
 
-        self.logger.log("Starting sandbox", level=LogLevel.INFO)
+        self.logger.log("Starting Modal sandbox", level=LogLevel.INFO)
         self.sandbox = modal.Sandbox.create(
             *entrypoint,
             **sandbox_create_kwargs_,
         )
 
         tunnel = self.sandbox.tunnels()[port]
-        self.logger.log(f"Waiting for sandbox on {tunnel.host}:{port}...", level=LogLevel.INFO)
+        self.logger.log(f"Waiting for Modal sandbox on {tunnel.host}:{port}", level=LogLevel.INFO)
         self._wait_for_server(tunnel.host, token)
 
-        self.logger.log("Starting kernel", level=LogLevel.INFO)
+        self.logger.log("Starting Jupyter kernel", level=LogLevel.INFO)
         kernel_id = _create_kernel_http(f"https://{tunnel.host}/api/kernels?token={token}", logger)
         self.ws_url = f"wss://{tunnel.host}/api/kernels/{kernel_id}/channels?token={token}"
         self.installed_packages = self.install_packages(additional_imports)
@@ -560,7 +562,8 @@ class ModalExecutor(RemotePythonExecutor):
             return _websocket_run_code_raise_errors(code, ws, self.logger)
 
     def cleanup(self):
-        self.sandbox.terminate()
+        if hasattr(self, "sandbox"):
+            self.sandbox.terminate()
 
     def delete(self):
         """Ensure cleanup on deletion."""
@@ -571,12 +574,13 @@ class ModalExecutor(RemotePythonExecutor):
         n_retries = 0
         while True:
             try:
-                self.logger.log(f"Waiting for server to startup, retried {n_retries} times.", level=LogLevel.INFO)
                 resp = requests.get(f"https://{host}/api/kernelspecs?token={token}")
                 if resp.status_code == 200:
                     break
             except RequestException:
                 n_retries += 1
+                if n_retries % 10 == 0:
+                    self.logger.log("Waiting for server to startup, retrying...", level=LogLevel.INFO)
                 if n_retries > 60:
                     raise RuntimeError("Unable to connect to sandbox")
                 time.sleep(1.0)
