@@ -491,7 +491,12 @@ class ModalExecutor(RemotePythonExecutor):
         sandbox_create_kwargs=None,
     ):
         super().__init__(additional_imports, logger)
-        import modal
+        try:
+            import modal
+        except ModuleNotFoundError:
+            raise ModuleNotFoundError(
+                """Please install 'modal' extra to use ModalExecutor: `pip install 'smolagents[modal]'`"""
+            )
 
         if sandbox_create_kwargs is None:
             sandbox_create_kwargs = {}
