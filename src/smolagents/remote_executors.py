@@ -549,6 +549,13 @@ class ModalExecutor(RemotePythonExecutor):
             e.message = self._strip_ansi_colors(e.message)
             raise e
 
+    def cleanup(self):
+        self.sandbox.terminate()
+
+    def delete(self):
+        """Ensure cleanup on deletion."""
+        self.cleanup()
+
     @classmethod
     def _wait_for_server(cls, host: str, token: str):
         """Wait for server to start up."""
@@ -576,13 +583,6 @@ class ModalExecutor(RemotePythonExecutor):
     def _strip_ansi_colors(cls, text: str) -> str:
         """Remove ansi colors from text."""
         return cls._ANSI_ESCAPE.sub("", text)
-
-    def cleanup(self):
-        self.sandbox.terminate()
-
-    def delete(self):
-        """Ensure cleanup on deletion."""
-        self.cleanup()
 
 
 class WasmExecutor(RemotePythonExecutor):
