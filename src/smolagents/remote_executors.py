@@ -522,8 +522,9 @@ class ModalExecutor(RemotePythonExecutor):
         else:
             sandbox_create_kwargs_["encrypted_ports"] = sandbox_create_kwargs_["encrypted_ports"] + [port]
 
-        token = secrets.token_urlsafe(13)
+        token = secrets.token_urlsafe(16)
         default_secrets = [modal.Secret.from_dict({"KG_AUTH_TOKEN": token})]
+
         if "secrets" not in sandbox_create_kwargs_:
             sandbox_create_kwargs_["secrets"] = default_secrets
         else:
@@ -555,12 +556,8 @@ class ModalExecutor(RemotePythonExecutor):
     def run_code_raise_errors(self, code: str) -> CodeOutput:
         from websocket import create_connection
 
-        try:
-            with closing(create_connection(self.ws_url)) as ws:
-                return _websocket_run_code_raise_errors(code, ws, self.logger)
-        except AgentError as e:
-            e.message = self._strip_ansi_colors(e.message)
-            raise e
+        with closing(create_connection(self.ws_url)) as ws:
+            return _websocket_run_code_raise_errors(code, ws, self.logger)
 
     def cleanup(self):
         self.sandbox.terminate()
