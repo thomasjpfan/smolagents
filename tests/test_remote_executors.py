@@ -388,7 +388,7 @@ class TestModalExecutorUnit:
             logger=logger,
             app_name="my-custom-app-name",
             port=port,
-            sandbox_create_kwargs={
+            create_kwargs={
                 "secrets": [modal.Secret.from_dict({"MY_SECRET": "ABC"})],
                 "timeout": 100,
                 "cpu": 2,

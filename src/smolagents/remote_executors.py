@@ -41,7 +41,7 @@ from .tools import Tool, get_tools_definition_code
 from .utils import AgentError
 
 
-__all__ = ["E2BExecutor", "ModalExecutor","DockerExecutor", "WasmExecutor"]
+__all__ = ["E2BExecutor", "ModalExecutor", "DockerExecutor", "WasmExecutor"]
 
 
 try:
@@ -483,7 +483,7 @@ class ModalExecutor(RemotePythonExecutor):
         additional_imports: Additional imports to install.
         logger (`Logger`): Logger to use for output and errors.
         app (`str`): App name.
-        sandbox_create_kwargs (`dict`, optional): Keyword arguments to pass to creating the sandbox. See
+        create_kwargs (`dict`, optional): Keyword arguments to pass to creating the sandbox. See
             `modal.Sandbox.create` [docs](https://modal.com/docs/reference/modal.Sandbox#create) for all the
             keyword arguments.
     """
@@ -496,7 +496,7 @@ class ModalExecutor(RemotePythonExecutor):
         logger,
         app_name: str = "smolagent-executor",
         port: int = 8888,
-        sandbox_create_kwargs: Optional[dict] = None,
+        create_kwargs: Optional[dict] = None,
     ):
         super().__init__(additional_imports, logger)
         self.port = port
@@ -507,30 +507,30 @@ class ModalExecutor(RemotePythonExecutor):
                 """Please install 'modal' extra to use ModalExecutor: `pip install 'smolagents[modal]'`"""
             )
 
-        if sandbox_create_kwargs is None:
-            sandbox_create_kwargs = {}
+        if create_kwargs is None:
+            create_kwargs = {}
 
-        sandbox_create_kwargs_ = {
+        create_kwargs_ = {
             "image": modal.Image.debian_slim().uv_pip_install("jupyter_kernel_gateway", "ipykernel"),
             "timeout": 60 * 5,
-            **sandbox_create_kwargs,
+            **create_kwargs,
         }
 
-        if "app" not in sandbox_create_kwargs_:
-            sandbox_create_kwargs_["app"] = modal.App.lookup(app_name, create_if_missing=True)
+        if "app" not in create_kwargs_:
+            create_kwargs_["app"] = modal.App.lookup(app_name, create_if_missing=True)
 
-        if "encrypted_ports" not in sandbox_create_kwargs_:
-            sandbox_create_kwargs_["encrypted_ports"] = [self.port]
+        if "encrypted_ports" not in create_kwargs_:
+            create_kwargs_["encrypted_ports"] = [self.port]
         else:
-            sandbox_create_kwargs_["encrypted_ports"] = sandbox_create_kwargs_["encrypted_ports"] + [port]
+            create_kwargs_["encrypted_ports"] = create_kwargs_["encrypted_ports"] + [port]
 
         token = secrets.token_urlsafe(16)
         default_secrets = [modal.Secret.from_dict({"KG_AUTH_TOKEN": token})]
 
-        if "secrets" not in sandbox_create_kwargs_:
-            sandbox_create_kwargs_["secrets"] = default_secrets
+        if "secrets" not in create_kwargs_:
+            create_kwargs_["secrets"] = default_secrets
         else:
-            sandbox_create_kwargs_["secrets"] = sandbox_create_kwargs_["secrets"] + default_secrets
+            create_kwargs_["secrets"] = create_kwargs_["secrets"] + default_secrets
 
         entrypoint = [
             "jupyter",
@@ -543,7 +543,7 @@ class ModalExecutor(RemotePythonExecutor):
         self.logger.log("Starting Modal sandbox", level=LogLevel.INFO)
         self.sandbox = modal.Sandbox.create(
             *entrypoint,
-            **sandbox_create_kwargs_,
+            **create_kwargs_,
         )
 
         tunnel = self.sandbox.tunnels()[port]
