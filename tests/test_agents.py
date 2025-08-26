@@ -730,9 +730,9 @@ nested_answer()
         input_messages = first_planning_step.model_input_messages
 
         # Check message structure and content
-        assert len(input_messages) == 4, (
-            "First planning step should have 4 messages: system-plan-pre-update + memory + task + user-plan-post-update"
-        )
+        assert (
+            len(input_messages) == 4
+        ), "First planning step should have 4 messages: system-plan-pre-update + memory + task + user-plan-post-update"
 
         # Verify system message contains current task
         system_message = input_messages[0]
@@ -741,9 +741,9 @@ nested_answer()
 
         # Verify memory message contains previous task
         memory_message = input_messages[1]
-        assert previous_task in memory_message.content[0]["text"], (
-            f"Memory message should contain previous task: '{previous_task}'"
-        )
+        assert (
+            previous_task in memory_message.content[0]["text"]
+        ), f"Memory message should contain previous task: '{previous_task}'"
 
         # Verify task message contains current task
         task_message = input_messages[2]
@@ -884,7 +884,7 @@ class TestRunResult:
         assert result.output == "This is the final answer."
         assert result.state == "success"
         assert result.token_usage is None
-        assert isinstance(result.steps, list)
+        assert isinstance(result.messages, list)
         assert result.timing.duration > 0
 
     @pytest.mark.parametrize(
@@ -910,7 +910,7 @@ class TestRunResult:
             assert result.output == "This is the final answer."
             assert result.state == "success"
             assert result.token_usage == TokenUsage(input_tokens=10, output_tokens=20)
-            assert isinstance(result.steps, list)
+            assert isinstance(result.messages, list)
             assert result.timing.duration > 0
         else:
             assert isinstance(result, str)
@@ -2064,10 +2064,12 @@ class TestCodeAgent:
         assert output == "got an error"
         assert '    print("Failing due to unexpected indent")' in str(agent.memory.steps)
         assert isinstance(agent.memory.steps[-2], ActionStep)
-        assert agent.memory.steps[-2].code_action == dedent("""a = 2
+        assert agent.memory.steps[-2].code_action == dedent(
+            """a = 2
 b = a * 2
     print("Failing due to unexpected indent")
-print("Ok, calculation done!")""")
+print("Ok, calculation done!")"""
+        )
 
     def test_end_code_appending(self):
         # Checking original output message

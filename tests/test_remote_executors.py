@@ -8,8 +8,9 @@ import pytest
 from rich.console import Console
 
 from smolagents.default_tools import FinalAnswerTool, WikipediaSearchTool
+from smolagents.local_python_executor import CodeOutput
 from smolagents.monitoring import AgentLogger, LogLevel
-from smolagents.remote_executors import DockerExecutor, E2BExecutor, RemotePythonExecutor, WasmExecutor
+from smolagents.remote_executors import DockerExecutor, E2BExecutor, ModalExecutor, RemotePythonExecutor, WasmExecutor
 from smolagents.utils import AgentError
 
 from .utils.markers import require_run_all
@@ -98,30 +99,36 @@ class TestE2BExecutorIntegration:
         "code_action, expected_result",
         [
             (
-                dedent('''
+                dedent(
+                    '''
                     final_answer("""This is
                     a multiline
                     final answer""")
-                '''),
+                '''
+                ),
                 "This is\na multiline\nfinal answer",
             ),
             (
-                dedent("""
+                dedent(
+                    """
                     text = '''Text containing
                     final_answer(5)
                     '''
                     final_answer(text)
-                """),
+                """
+                ),
                 "Text containing\nfinal_answer(5)\n",
             ),
             (
-                dedent("""
+                dedent(
+                    """
                     num = 2
                     if num == 1:
                         final_answer("One")
                     elif num == 2:
                         final_answer("Two")
-                """),
+                """
+                ),
                 "Two",
             ),
         ],
@@ -138,9 +145,11 @@ class TestE2BExecutorIntegration:
                 return "CUSTOM" + answer
 
         self.executor.send_tools({"final_answer": CustomFinalAnswerTool()})
-        code_action = dedent("""
+        code_action = dedent(
+            """
             final_answer(answer="_answer")
-        """)
+        """
+        )
         code_output = self.executor(code_action)
         assert code_output.is_final_answer is True
         assert code_output.output == "CUSTOM_answer"
@@ -156,12 +165,14 @@ class TestE2BExecutorIntegration:
                 return answer1 + "CUSTOM" + answer2
 
         self.executor.send_tools({"final_answer": CustomFinalAnswerToolWithCustomInputs()})
-        code_action = dedent("""
+        code_action = dedent(
+            """
             final_answer(
                 answer1="answer1_",
                 answer2="_answer2"
             )
-        """)
+        """
+        )
         code_output = self.executor(code_action)
         assert code_output.is_final_answer is True
         assert code_output.output == "answer1_CUSTOM_answer2"
@@ -198,25 +209,10 @@ class TestDockerExecutorUnit:
             mock_container.remove.assert_called_once()
 
 
-@pytest.fixture
-def docker_executor():
-    executor = DockerExecutor(
-        additional_imports=["pillow", "numpy"],
-        logger=AgentLogger(LogLevel.INFO, Console(force_terminal=False, file=io.StringIO())),
-    )
-    yield executor
-    executor.delete()
-
-
-@require_run_all
-class TestDockerExecutorIntegration:
+class CommonDockerExecutorIntegration:
     @pytest.fixture(autouse=True)
-    def set_executor(self, docker_executor):
-        self.executor = docker_executor
-
-    def test_initialization(self):
-        """Check if DockerExecutor initializes without errors"""
-        assert self.executor.container is not None, "Container should be initialized"
+    def set_executor(self, custom_executor):
+        self.executor = custom_executor
 
     def test_state_persistence(self):
         """Test that variables and imports form one snippet persist in the next"""
@@ -244,13 +240,15 @@ class TestDockerExecutorIntegration:
     def test_execute_image_output(self):
         """Test execution that returns a base64 image"""
         self.executor.send_tools({"final_answer": FinalAnswerTool()})
-        code_action = dedent("""
+        code_action = dedent(
+            """
             import base64
             from PIL import Image
             from io import BytesIO
             image = Image.new("RGB", (10, 10), (255, 0, 0))
             final_answer(image)
-        """)
+        """
+        )
         code_output = self.executor(code_action)
         assert isinstance(code_output.output, PIL.Image.Image), "Result should be a PIL Image"
 
@@ -261,43 +259,40 @@ class TestDockerExecutorIntegration:
             self.executor(code_action)
         assert "SyntaxError" in str(exception_info.value), "Should raise a syntax error"
 
-    def test_cleanup_on_deletion(self):
-        """Test if Docker container stops and removes on deletion"""
-        container_id = self.executor.container.id
-        self.executor.delete()  # Trigger cleanup
-
-        client = docker.from_env()
-        containers = [c.id for c in client.containers.list(all=True)]
-        assert container_id not in containers, "Container should be removed"
-
     @pytest.mark.parametrize(
         "code_action, expected_result",
         [
             (
-                dedent('''
+                dedent(
+                    '''
                     final_answer("""This is
                     a multiline
                     final answer""")
-                '''),
+                '''
+                ),
                 "This is\na multiline\nfinal answer",
             ),
             (
-                dedent("""
+                dedent(
+                    """
                     text = '''Text containing
                     final_answer(5)
                     '''
                     final_answer(text)
-                """),
+                """
+                ),
                 "Text containing\nfinal_answer(5)\n",
             ),
             (
-                dedent("""
+                dedent(
+                    """
                     num = 2
                     if num == 1:
                         final_answer("One")
                     elif num == 2:
                         final_answer("Two")
-                """),
+                """
+                ),
                 "Two",
             ),
         ],
@@ -314,9 +309,11 @@ class TestDockerExecutorIntegration:
                 return "CUSTOM" + answer
 
         self.executor.send_tools({"final_answer": CustomFinalAnswerTool()})
-        code_action = dedent("""
+        code_action = dedent(
+            """
             final_answer(answer="_answer")
-        """)
+        """
+        )
         code_output = self.executor(code_action)
         assert code_output.is_final_answer is True
         assert code_output.output == "CUSTOM_answer"
@@ -332,15 +329,110 @@ class TestDockerExecutorIntegration:
                 return answer1 + "CUSTOM" + answer2
 
         self.executor.send_tools({"final_answer": CustomFinalAnswerToolWithCustomInputs()})
-        code_action = dedent("""
+        code_action = dedent(
+            """
             final_answer(
                 answer1="answer1_",
                 answer2="_answer2"
             )
-        """)
+        """
+        )
         code_output = self.executor(code_action)
         assert code_output.is_final_answer is True
         assert code_output.output == "answer1_CUSTOM_answer2"
+
+
+@require_run_all
+class TestDockerExecutorIntegration(CommonDockerExecutorIntegration):
+    @pytest.fixture
+    def custom_executor(self):
+        executor = DockerExecutor(
+            additional_imports=["pillow", "numpy"],
+            logger=AgentLogger(LogLevel.INFO, Console(force_terminal=False, file=io.StringIO())),
+        )
+        yield executor
+        executor.delete()
+
+    def test_initialization(self):
+        """Check if DockerExecutor initializes without errors"""
+        assert self.executor.container is not None, "Container should be initialized"
+
+    def test_cleanup_on_deletion(self):
+        """Test if Docker container stops and removes on deletion"""
+        container_id = self.executor.container.id
+        self.executor.delete()  # Trigger cleanup
+
+        client = docker.from_env()
+        containers = [c.id for c in client.containers.list(all=True)]
+        assert container_id not in containers, "Container should be removed"
+
+
+@require_run_all
+class TestModalExecutorIntegration(CommonDockerExecutorIntegration):
+    @pytest.fixture
+    def custom_executor(self):
+        executor = ModalExecutor(
+            additional_imports=["pillow", "numpy"],
+            logger=AgentLogger(LogLevel.INFO, Console(force_terminal=False, file=io.StringIO())),
+        )
+        yield executor
+        executor.delete()
+
+
+class TestModalExecutorUnit:
+    @patch("smolagents.remote_executors._websocket_run_code_raise_errors")
+    @patch("requests.post")
+    @patch("requests.get")
+    @patch("websocket.create_connection")
+    @patch("modal.App.lookup")
+    @patch("modal.Sandbox.create")
+    def test_sandbox_lifecycle(
+        self, mock_sandbox_create, mock_app_lookup, mock_create_connection, mock_get, mock_post, mock_run_code_raises
+    ):
+        """Test that sandbox is created with the correct kwargs and cleaned up correctly."""
+        modal = pytest.importorskip("modal")
+        port = 8889
+
+        logger = MagicMock()
+        mock_sandbox = MagicMock()
+        tunnel_mock = MagicMock()
+        tunnel_mock.host = "r4234.modal.host"
+        mock_sandbox.tunnels.return_value = {port: tunnel_mock}
+
+        mock_get.return_value.status_code = 200
+        mock_post.return_value.status_code = 201
+        mock_post.return_value.json.return_value = {"id": "test-kernel-id"}
+        mock_run_code_raises.return_value = CodeOutput(output="3", logs="", is_final_answer=False)
+        mock_sandbox_create.return_value = mock_sandbox
+
+        executor = ModalExecutor(
+            additional_imports=[],
+            logger=logger,
+            app_name="my-custom-app-name",
+            port=port,
+            create_kwargs={
+                "secrets": [modal.Secret.from_dict({"MY_SECRET": "ABC"})],
+                "timeout": 100,
+                "cpu": 2,
+            },
+        )
+
+        create_call = mock_sandbox_create.mock_calls[0]
+        assert create_call.args == (
+            "jupyter",
+            "kernelgateway",
+            "--KernelGatewayApp.ip='0.0.0.0'",
+            f"--KernelGatewayApp.port={port}",
+            "--KernelGatewayApp.allow_origin='*'",
+        )
+        assert create_call.kwargs["timeout"] == 100
+        assert create_call.kwargs["cpu"] == 2
+        assert len(create_call.kwargs["secrets"]) == 2
+        mock_app_lookup.assert_called_with("my-custom-app-name", create_if_missing=True)
+
+        executor.run_code_raise_errors("1 + 2")
+        executor.cleanup()
+        mock_sandbox.terminate.assert_called()
 
 
 class TestWasmExecutorUnit:
